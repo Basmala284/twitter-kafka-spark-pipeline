@@ -2,56 +2,78 @@ package com.basmala284;
 
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.serialization.StringSerializer;
-import twitter4j.*;
-import twitter4j.conf.ConfigurationBuilder;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.Properties;
 
 public class TwitterKafkaProducer {
     public static void main(String[] args) {
-        // Twitter API credentials
-        String consumerKey = "ZJYs8LEIuEXHVykFNDFV3lSdp";
-        String consumerSecret = "eRJhgAXsWkU6CfUE0oLHcyoPZte1SMEvxTfLjreaWTu5GYuHCA";
-        String accessToken = "1917127361377542144-QaAbJU0LW2Pj0aCfnHUkNFMIC7rDLV";
-        String accessTokenSecret = "rQR0cmowwLxEj25s9i9LpfbsPOYwqeLUFGITVMCPlhjU4";
+        // Twitter API Bearer Token
+        String bearerToken = "AAAAAAAAAAAAAAAAAAAAABG90wEAAAAAznA%2F447rttc3qv2wlhq6nLrdIEk%3DYtYXyi0PmXrxoMWXrNzGtxBF5TmW2CbvOw5PmJjHLFa9CkOQ5O"; // Replace with your Bearer Token from Twitter Developer Portal
 
         // Kafka topic
         String topic = "twitter_topic";
 
-        // Set up Twitter API configuration
-        ConfigurationBuilder cb = new ConfigurationBuilder();
-        cb.setDebugEnabled(true)
-                .setOAuthConsumerKey(consumerKey)
-                .setOAuthConsumerSecret(consumerSecret)
-                .setOAuthAccessToken(accessToken)
-                .setOAuthAccessTokenSecret(accessTokenSecret);
-
-        // Create Twitter instance
-        TwitterFactory tf = new TwitterFactory(cb.build());
-        Twitter twitter = tf.getInstance();
-
         // Set up Kafka producer
+
         Properties props = new Properties();
+//        props.put("bootstrap.servers", "localhost:9092");
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 
         KafkaProducer<String, String> producer = new KafkaProducer<>(props);
 
+        // Twitter API v2 Recent Search Endpoint
+        String query = "Football"; // Search query
+        int maxResults = 10; // Number of tweets to fetch
+        String url = String.format(
+                "https://api.twitter.com/2/tweets/search/recent?query=%s&max_results=%d",
+                query, maxResults
+        );
+
         try {
-            // Search for tweets with specific hashtags or keywords
-            Query query = new Query("#exampleHashtag");
-            query.setCount(100); // Fetch up to 100 tweets per request
-            QueryResult result = twitter.search(query);
+            // Create HTTP client and request
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Authorization", "Bearer " + bearerToken)
+                    .GET()
+                    .build();
 
-            for (Status status : result.getTweets()) {
-                String tweet = status.getText();
-                System.out.println("Tweet: " + tweet);
+            // Send the request
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-                // Send the tweet to the Kafka topic
-                producer.send(new ProducerRecord<>(topic, tweet));
+            // Parse the JSON response
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode responseJson = mapper.readTree(response.body());
+
+            // Extract and send tweets to Kafka
+            if (responseJson.has("data")) {
+                for (JsonNode tweet : responseJson.get("data")) {
+                    String tweetText = tweet.get("text").asText();
+
+                    // Add metadata to the tweet
+                    String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+                    int tweetLength = tweetText.length();
+                    String enrichedTweet = String.format("{\"tweet\":\"%s\", \"timestamp\":\"%s\", \"length\":%d}",
+                            tweetText, timestamp, tweetLength);
+
+                    // Publish enriched tweet to Kafka
+                    System.out.println("Enriched Tweet: " + enrichedTweet);
+                    producer.send(new ProducerRecord<>(topic, enrichedTweet));
+                }
+            } else {
+                System.out.println("No tweets found for the query: " + query);
             }
-        } catch (TwitterException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         } finally {
             producer.close();
